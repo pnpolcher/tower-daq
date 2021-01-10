@@ -50,8 +50,10 @@
 #include "fsl_debug_console.h"
 #include "fsl_dspi.h"
 #include "fsl_dspi_freertos.h"
+#include "fsl_gpio.h"
 
 #include "ltc1859.h"
+#include "ltc2498.h"
 #include "twr_adcdac.h"
 
 /* TODO: insert other definitions and declarations here. */
@@ -77,6 +79,7 @@
 
 static void prvQueueReceiveTask(void *pvParameters);
 static void vLtc1859SampleTimerCallback(TimerHandle_t xTimer);
+static void vLtc2498SampleTimerCallback(TimerHandle_t xTimer);
 
 void init_spi();
 void init_gpio();
@@ -85,10 +88,12 @@ static QueueHandle_t xQueue = NULL;
 static SemaphoreHandle_t xEventSemaphore = NULL;
 static SemaphoreHandle_t xSpiSemaphore = NULL;
 static TimerHandle_t xLtc1859SampleTimer = NULL;
+static TimerHandle_t xLtc2498SampleTimer = NULL;
 
 static dspi_rtos_handle_t twr_spi_handle;
 
 uint16_t ltc1859_result;
+uint32_t ltc2498_result;
 
 /*
  * @brief   Application entry point.
@@ -100,7 +105,6 @@ int main(void) {
     BOARD_InitBootPeripherals();
 
     init_spi();
-    init_gpio();
 
     xLtc1859SampleTimer = xTimerCreate(
 		"Ltc1859SampleTimer",
@@ -108,6 +112,14 @@ int main(void) {
 		pdTRUE,
 		(void *)0,
 		vLtc1859SampleTimerCallback
+	);
+
+    xLtc2498SampleTimer = xTimerCreate(
+		"Ltc2498SampleTimer",
+		pdMS_TO_TICKS(1000),
+		pdTRUE,
+		(void *)0,
+		vLtc2498SampleTimerCallback
 	);
 
     xQueue = xQueueCreate(
@@ -131,26 +143,10 @@ int main(void) {
     printf("Hello World\n");
 
     xTimerStart(xLtc1859SampleTimer, 0);
+    xTimerStart(xLtc2498SampleTimer, 0);
 
     vTaskStartScheduler();
     for(;;);
-}
-
-void init_gpio()
-{
-	/*
-	 * GPIO7 -> PTE27 (SD_WP_DET)
-	 * GPIO8 -> PTE5 (SDHC_D2)
-	 * GPIO9 -> PTC19 (CTS1)
-	 */
-
-	// Configure PTE27 and PTE5 (GPIO7 and GPIO8 in TWR-ADCDAC-LTC) as outputs.
-	GPIOE->PDOR |= (GPIO7 | GPIO8);
-	GPIOE->PCOR |= (GPIO7 | GPIO8);
-
-	// Configure PTC19 (GPIO9) as output.
-	GPIOC->PDOR |= GPIO9;
-	GPIOC->PCOR |= GPIO9;
 }
 
 void init_spi()
@@ -159,25 +155,28 @@ void init_spi()
     status_t status;
 
 	masterConfig.whichCtar = kDSPI_Ctar0;
-	masterConfig.ctarConfig.baudRate = 500000U;
+	masterConfig.ctarConfig.baudRate = 1000U;
 	masterConfig.ctarConfig.bitsPerFrame = 8;
 	masterConfig.ctarConfig.cpol = kDSPI_ClockPolarityActiveHigh; // (CPOL = 0)
 	masterConfig.ctarConfig.cpha = kDSPI_ClockPhaseFirstEdge; // (CPHA = 0)
 	masterConfig.ctarConfig.direction = kDSPI_MsbFirst;
 
-	// Not really used, CS
     masterConfig.whichPcs = kDSPI_Pcs0;
     masterConfig.pcsActiveHighOrLow = kDSPI_PcsActiveLow;
 
 	NVIC_SetPriority(TWR_SPI_BASE_IRQN, DSPI_NVIC_PRIO + 1);
 
 	status = DSPI_RTOS_Init(&twr_spi_handle, TWR_SPI_BASE_ADDRESS, &masterConfig, TWR_SPI_CLK_FREQ);
-
     if (status != kStatus_Success)
     {
         // PRINTF("DSPI master: error during initialization. \r\n");
         vTaskSuspend(NULL);
     }
+
+	masterConfig.whichCtar = kDSPI_Ctar1;
+	masterConfig.ctarConfig.bitsPerFrame = 16;
+
+	DSPI_MasterInit(TWR_SPI_BASE_ADDRESS, &masterConfig, TWR_SPI_CLK_FREQ);
 }
 
 static void prvQueueReceiveTask(void *pvParameters)
@@ -199,13 +198,12 @@ static void vLtc1859SampleTimerCallback(TimerHandle_t xTimer)
 	dspi_transfer_t masterXfer;
 	status_t status;
 
-	printf("Timer reached!\n");
-
 	if (xSemaphoreTake(xSpiSemaphore, (TickType_t)10) == pdTRUE)
 	{
-		uint16_t adc_command = (LTC1859_CH0 | LTC1859_UNIPOLAR_MODE | LTC1859_LOW_RANGE_MODE | LTC1859_NORMAL_MODE) << 8;
+		uint16_t adc_command = (LTC1859_CH0 | LTC1859_UNIPOLAR_MODE | LTC1859_LOW_RANGE_MODE | LTC1859_NORMAL_MODE);
 
 		printf("Sending command 0x%x to LTC1859.\n", adc_command);
+
 		ltc1859_cs_enable();
 
 		masterXfer.dataSize = 2;
@@ -216,9 +214,54 @@ static void vLtc1859SampleTimerCallback(TimerHandle_t xTimer)
 
 		if (status == kStatus_Success)
 		{
-			printf("Value received = %d\n", ltc1859_result);
+			float voltage = ((float)ltc1859_result) / 65535.0f * 5.0f;
+			printf("Value received = %x\n", ltc1859_result);
+			printf("LTC1859 voltage = %d\n", (int32_t)(voltage * 1000.0f));
 		}
-		ltc1859_cs_disable();
+
+		cs_disable();
+		xSemaphoreGive(xSpiSemaphore);
+	}
+	else
+	{
+
+	}
+}
+
+static void vLtc2498SampleTimerCallback(TimerHandle_t xTimer)
+{
+	dspi_transfer_t masterXfer;
+	status_t status;
+
+	ltc2498_result = 0;
+	if (xSemaphoreTake(xSpiSemaphore, (TickType_t)10) == pdTRUE)
+	{
+
+		//uint32_t adc_command = (LTC2498_CH0 << 24);// | (LTC2498_R50 << 16);
+		// uint32_t adc_command = (LTC2498_R50 << 8) | LTC2498_CH0;
+		uint32_t adc_command = 0x90B0;
+		printf("Sending command 0x%x to LTC2498.\n", adc_command);
+
+		ltc2498_cs_enable();
+
+		masterXfer.dataSize = 4;
+		masterXfer.txData = (uint8_t *)&adc_command;
+		masterXfer.rxData = (uint8_t *)&ltc2498_result;
+		masterXfer.configFlags = kDSPI_MasterCtar0 | kDSPI_MasterPcs0 | kDSPI_MasterPcsContinuous;
+		status = DSPI_RTOS_Transfer(&twr_spi_handle, &masterXfer);
+
+		if (status == kStatus_Success)
+		{
+			ltc2498_result =
+					((ltc2498_result & 0x000000ff) << 24) |
+					((ltc2498_result & 0x0000ff00) << 8) |
+					((ltc2498_result & 0x00ff0000) >> 8) |
+					((ltc2498_result & 0xff000000) >> 24);
+			float voltage = (float)(ltc2498_result - 0x20000000) / 268435456.0f * 2.5f;
+			printf("LTC2498 voltage = %d\n", (int32_t)(voltage * 1000.0f));
+		}
+
+		cs_disable();
 		xSemaphoreGive(xSpiSemaphore);
 	}
 	else

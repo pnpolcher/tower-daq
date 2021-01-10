@@ -1,16 +1,24 @@
 #include "twr_adcdac.h"
 
+#include "fsl_gpio.h"
 #include "MK40D10.h"
 
 
 void ltc1859_cs_enable()
 {
-	GPIOE->PSOR |= (GPIO7 | GPIO8);
-	GPIOC->PSOR |= GPIO9;
+	GPIO_SetPinsOutput(BOARD_INITPINS_GPIO7_GPIO, GPIO7 | GPIO8);
+	GPIO_SetPinsOutput(BOARD_INITPINS_GPIO9_GPIO, GPIO9);
 }
 
-void ltc1859_cs_disable()
+void ltc2498_cs_enable()
 {
-	GPIOE->PCOR |= (GPIO7 | GPIO8);
-	GPIOC->PCOR |= GPIO9;
+	GPIO_ClearPinsOutput(BOARD_INITPINS_GPIO7_GPIO, GPIO7);
+	GPIO_SetPinsOutput(BOARD_INITPINS_GPIO8_GPIO, GPIO8);
+	GPIO_SetPinsOutput(BOARD_INITPINS_GPIO9_GPIO, GPIO9);
+}
+
+void cs_disable()
+{
+	GPIO_ClearPinsOutput(BOARD_INITPINS_GPIO7_GPIO, GPIO7 | GPIO8);
+	GPIO_ClearPinsOutput(BOARD_INITPINS_GPIO9_GPIO, GPIO9);
 }
